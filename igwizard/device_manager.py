@@ -4,10 +4,13 @@ from enum import Enum, unique
 from os import listdir
 from random import uniform
 import re
+from time import sleep
+from typing import Optional
 import uiautomator2 as u2
 from insomniac import sleeper
-from insomniac.utils import COLOR_ENDC, COLOR_FAIL, COLOR_OKGREEN
-from uiautomator2 import Device
+from insomniac.utils import COLOR_ENDC, COLOR_FAIL, COLOR_OKGREEN, COLOR_REPORT
+from uiautomator2 import Device, UiObject
+from PIL.Image import Image
 
 UI_TIMEOUT_LONG = 5
 UI_TIMEOUT_SHORT = 1
@@ -24,6 +27,14 @@ class Place(Enum):
     CENTER = 2
     BOTTOM = 3
     LEFT = 4
+
+
+@unique
+class Direction(Enum):
+    TOP = 0
+    BOTTOM = 1
+    RIGHT = 2
+    LEFT = 3
 
 
 @dataclass
@@ -178,9 +189,203 @@ class DeviceManager:
         return self.get_info().productName
 
     def unlock(self):
-        self.swipe(DeviceFacade.Direction.TOP, 0.8)
+        self.swipe(Direction.TOP, 0.8)
         if self.is_screen_locked():
-            self.swipe(DeviceFacade.Direction.RIGHT, 0.8)
+            self.swipe(Direction.RIGHT, 0.8)
+
+    def screen_off(self):
+        self.device.screen_off()
+
+    def swipe(self, direction: Direction, scale: float = 0.5):
+        swipe_dir = ""
+        if direction == Direction.TOP:
+            swipe_dir = "up"
+        elif direction == Direction.RIGHT:
+            swipe_dir = "right"
+        elif direction == Direction.LEFT:
+            swipe_dir = "left"
+        elif direction == Direction.BOTTOM:
+            swipe_dir = "down"
+        self.device.swipe_ext(swipe_dir, scale=scale)
 
     def get_info(self) -> DeviceInfo:
         return DeviceInfo.from_dict(self.device.info)
+
+    def swipe_points(self, sx, sy, ex, ey, duration=None):
+        if duration:
+            self.device.swipe_points([[sx, sy], [ex, ey]], duration)
+        else:
+            self.device.swipe_points([[sx, sy], [ex, ey]], uniform(0.2, 0.6))
+
+    def is_keyboard_open(self) -> bool:
+        res = self.device.shell("dumpsys input_method")
+        data = res.output.strip()
+        #  return "mInputShown=true" in data
+        flag = re.search("mInputShown=(true|false)", data)
+        if flag is not None:
+            return True if flag.group(1) == "true" else False
+        return False
+
+    def close_keyboard(self):
+        if self.is_keyboard_open():
+            self.device.press("back")
+            print("Verifying again that keyboard is closed")
+            if self.is_keyboard_open():
+                print(
+                    COLOR_FAIL
+                    + "Keyboard is still open. Please close it manually and restart the script."
+                    + COLOR_ENDC
+                )
+            else:
+                print("Keyboard is closed now.")
+            return
+        print("Keyboard is already closed.")
+
+    def _get_screen_size(self) -> tuple[int, int]:
+        if self.width is not None and self.height is not None:
+            return self.width, self.height
+        _deviceInfo = self.get_info()
+        return _deviceInfo.displayWidth, _deviceInfo.displayHeight
+
+
+class View:
+    device = None
+
+    def __init__(self, view: UiObject, deviceManager: DeviceManager):
+        self.deviceManager: DeviceManager = deviceManager
+        self.view: UiObject = view
+
+    def __iter__(self):
+        children = []
+        for item in self.view:
+            children.append(View(item, self.device))
+        return iter(children)
+
+    def child(self, *args, **kwargs) -> Optional["View"]:
+        view = self.view.child(*args, **kwargs)
+        return View(view, self.device)
+
+    def right(self, *args, **kwargs) -> Optional["View"]:
+        view = self.view.right(*args, **kwargs)
+        return View(view, self.device)
+
+    def left(self, *args, **kwargs) -> Optional["View"]:
+        view = self.view.left(*args, **kwargs)
+        return View(view, self.device)
+
+    def up(self, *args, **kwargs) -> Optional["View"]:
+        view = self.view.up(*args, **kwargs)
+        return View(view, self.device)
+
+    def down(self, *args, **kwargs) -> Optional["View"]:
+        view = self.view.down(*args, **kwargs)
+        return View(view, self.device)
+
+    def click(
+        self, mode: Optional[Place] = None, ignore_if_missing: bool = False
+    ) -> None:
+        if ignore_if_missing and not self.exists(quick=True):
+            return
+        mode = Place.WHOLE if mode is None else mode
+        if mode == Place.WHOLE:
+            x_offset: float = uniform(0.15, 0.85)
+            y_offset: float = uniform(0.15, 0.85)
+
+        elif mode == Place.LEFT:
+            x_offset: float = uniform(0.15, 0.4)
+            y_offset: float = uniform(0.15, 0.85)
+
+        elif mode == Place.CENTER:
+            x_offset: float = uniform(0.4, 0.6)
+            y_offset: float = uniform(0.15, 0.85)
+
+        elif mode == Place.RIGHT:
+            x_offset: float = uniform(0.6, 0.85)
+            y_offset: float = uniform(0.15, 0.85)
+
+        else:
+            x_offset: float = 0.5
+            y_offset: float = 0.5
+        self.view.click(UI_TIMEOUT_LONG, offset=(x_offset, y_offset))
+
+    def long_click(self):
+        self.view.long_click()
+
+    def double_click(self, padding=0.3):
+        self._double_click(padding)
+
+    def exists(self, quick: bool = False) -> bool:
+        return self.view.exists(UI_TIMEOUT_SHORT if quick else UI_TIMEOUT_LONG)
+
+    def get_bounds(self):
+        return self.view.info["bounds"]
+
+    def get_width(self):
+        return self.get_bounds()["right"] - self.get_bounds()["left"]
+
+    def get_height(self):
+        return self.get_bounds()["bottom"] - self.get_bounds()["top"]
+
+    def get_text(self, retry=True):
+        max_attempts = 1 if not retry else 3
+        attempts = 0
+        while attempts < max_attempts:
+            attempts += 1
+
+            text = self.viewV2.info["text"]
+            if text is None:
+                if attempts < max_attempts:
+                    print(
+                        COLOR_REPORT + "Could not get text. "
+                        "Waiting 2 seconds and trying again..." + COLOR_ENDC
+                    )
+                    sleep(2)  # wait 2 seconds and retry
+                    continue
+            else:
+                return text
+            # print(
+            #     COLOR_FAIL
+            #     + f"Attempted to get text {attempts} times. You may have a slow network or are "
+            #     f"experiencing another problem." + COLOR_ENDC
+            # )
+            # return ""
+
+    def set_text(self, text: str):
+        self.view.set_text(text)
+
+    def get_selected(self) -> bool:
+        return self.view.info["selected"]
+
+    def is_enabled(self) -> bool:
+        return self.view.info["enabled"]
+
+    def is_focused(self) -> bool:
+        return self.view.info["focused"]
+
+    def get_image(self) -> Optional[Image]:
+        screenshot = self.view.screenshot()
+        bounds = self.get_bounds()
+        return screenshot.crop(
+            (bounds["left"], bounds["top"], bounds["right"], bounds["bottom"])
+        )
+
+    def _double_click(self, padding: float):
+        visible_bounds = self.get_bounds()
+        horizontal_len = visible_bounds["right"] - visible_bounds["left"]
+        vertical_len = visible_bounds["bottom"] - visible_bounds["top"]
+        horizintal_padding = int(padding * horizontal_len)
+        vertical_padding = int(padding * vertical_len)
+        random_x = int(
+            uniform(
+                visible_bounds["left"] + horizintal_padding,
+                visible_bounds["right"] - horizintal_padding,
+            )
+        )
+        random_y = int(
+            uniform(
+                visible_bounds["top"] + vertical_padding,
+                visible_bounds["bottom"] - vertical_padding,
+            )
+        )
+        time_between_clicks = uniform(0.050, 0.200)
+        self.deviceManager.device.double_click(random_x, random_y, time_between_clicks)
