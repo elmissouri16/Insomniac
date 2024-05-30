@@ -1,6 +1,6 @@
 from insomniac.device_facade import create_device
 from insomniac.params import resolve_app_id
-from insomniac.typewriter import Typewriter
+from insomniac.typewriter_removed import Typewriter
 from insomniac.utils import *
 
 

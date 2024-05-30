@@ -91,9 +91,9 @@ class DeviceManager:
             print(COLOR_FAIL + str(e) + COLOR_ENDC)
             self.device = None
 
-    def find(self, *args, **kwargs):
-        # TODO check if need to implement
-        pass
+    def find(self, *args, **kwargs) -> "View":
+        view = self.device(*args, **kwargs)
+        return View(view, self)
 
     def back(self):
         max_attempts = 2
